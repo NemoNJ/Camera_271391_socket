@@ -5,7 +5,7 @@ import base64
 import numpy as np
 
 async def send_frame():
-    uri = "ws://10.16.175.13:<PORT>"  # ระบุ IP ของคอมพิวเตอร์และพอร์ตที่ใช้งาน
+    uri = "ws://10.16.175.13:4868"  # ระบุ IP ของคอมพิวเตอร์และพอร์ตที่ใช้งาน
     async with websockets.connect(uri) as websocket:
         cap = cv2.VideoCapture(0)  # เปิดกล้อง
         while True:
