@@ -70,6 +70,15 @@ def receive_video(conn):
                 cv2.putText(frame, "7.5 cm", (center_x + 10, center_y - reduced_length ), font, 0.5, (0, 255, 255), 2)  # Yellow
                 cv2.putText(frame, "7.5 cm", (center_x + 10, center_y + reduced_length + 10), font, 0.5, (0, 0, 255), 2)  # Red
 
+                # Draw green lines parallel to the yellow line (200 pixels long)
+                green_line_length = 200
+
+                # Green line 1 (on the left side of yellow line, 90 pixels offset)
+                cv2.line(frame, (center_x - 100, center_y - green_line_length), (center_x - 100, center_y + green_line_length), (0, 255, 0), 2)  # Green
+
+                # Green line 2 (on the right side of yellow line, 90 pixels offset)
+                cv2.line(frame, (center_x + 100, center_y - green_line_length), (center_x + 100, center_y + green_line_length), (0, 255, 0), 2)  # Green
+
             # Display in appropriate window
             if camera_id == 1:
                 cv2.imshow("Camera 1", frame)
