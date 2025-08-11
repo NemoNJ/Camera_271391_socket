@@ -1,0 +1,147 @@
+import cv2
+import socket
+import struct
+import time
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int32
+import numpy as np
+
+# กำหนดค่าที่อยู่เซิร์ฟเวอร์
+server_ip = "10.205.101.13"  # เปลี่ยนเป็น IP ของคอมพิวเตอร์ที่รับข้อมูล
+server_port = 8080           # พอร์ตที่ใช้สื่อสาร
+
+class DistanceMeasurement(Node):
+    def __init__(self):
+        super().__init__('distance_measurement_node')
+        self.subscription = self.create_subscription(
+            Int32,
+            '/measure_distance',
+            self.measure_callback,
+            10)
+        self.points = []  # เก็บจุดที่ mark
+        self.awaiting_point = False  # สถานะรอรับจุดใหม่
+        self.measurement_active = False  # สถานะการวัดระยะ
+
+    def measure_callback(self, msg):
+        if msg.data == 1:  # เมื่อได้รับคำสั่ง mark จุด
+            if not self.measurement_active:
+                self.measurement_active = True
+                self.get_logger().info("Measurement activated")
+            
+            if len(self.points) < 2:
+                self.awaiting_point = True
+                self.get_logger().info("Ready to mark point")
+            else:
+                self.get_logger().info("Already have 2 points, clear first")
+                
+        elif msg.data == 0:  # เมื่อได้รับคำสั่งล้างจุด
+            self.points = []
+            self.awaiting_point = False
+            self.measurement_active = False
+            self.get_logger().info("All points cleared")
+
+def connect_to_server():
+    while True:
+        try:
+            client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            client_socket.connect((server_ip, server_port))
+            print("Connected to server.")
+            return client_socket
+        except (socket.error, ConnectionRefusedError):
+            print("Connection failed. Retrying in 3 seconds...")
+            time.sleep(3)
+
+def main():
+    # Initialize ROS2 node
+    rclpy.init()
+    distance_node = DistanceMeasurement()
+
+    # Initialize cameras
+    cap1 = cv2.VideoCapture(0)  # Camera for measurement
+    cap2 = cv2.VideoCapture(2)  # Second camera
+
+    # Reduce resolution
+    for cap in [cap1, cap2]:
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 80)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 60)
+        cap.set(cv2.CAP_PROP_FPS, 30)
+
+    client_socket = connect_to_server()
+
+    try:
+        while True:
+            rclpy.spin_once(distance_node, timeout_sec=0.01)
+            
+            ret1, frame1 = cap1.read()
+            ret2, frame2 = cap2.read()
+            
+            if not ret1 or not ret2:
+                print("Failed to capture frame from one or both cameras.")
+                break
+
+            # เมื่อระบบพร้อมรับจุดใหม่และผู้ใช้กด 'm'
+            if distance_node.awaiting_point and distance_node.measurement_active:
+                # ใช้ตำแหน่งกลางภาพเป็นจุดอ้างอิง
+                h, w = frame1.shape[:2]
+                current_point = (w//2, h//2)
+                distance_node.points.append(current_point)
+                print(f"Marked point at {current_point}")
+                distance_node.awaiting_point = False
+                
+                # ถ้ามีจุดครบ 2 จุดให้คำนวณระยะทาง
+                if len(distance_node.points) == 2:
+                    pt1, pt2 = distance_node.points
+                    distance = np.sqrt((pt2[0]-pt1[0])**2 + (pt2[1]-pt1[1])**2)
+                    print(f"Distance between points: {distance} pixels")
+
+            # วาดจุดและเส้นวัดระยะ
+            if len(distance_node.points) > 0:
+                for i, point in enumerate(distance_node.points):
+                    cv2.circle(frame1, point, 5, (0, 0, 255), -1)
+                    cv2.putText(frame1, f"Point {i+1}", (point[0]+10, point[1]+10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+                
+                if len(distance_node.points) == 2:
+                    cv2.line(frame1, distance_node.points[0], distance_node.points[1], 
+                            (0, 255, 0), 2)
+                    mid_x = (distance_node.points[0][0] + distance_node.points[1][0]) // 2
+                    mid_y = (distance_node.points[0][1] + distance_node.points[1][1]) // 2
+                    cv2.putText(frame1, f"Distance: {distance:.2f} px", 
+                               (mid_x, mid_y), cv2.FONT_HERSHEY_SIMPLEX, 
+                               0.5, (0, 255, 0), 2)
+            
+            # แสดงสถานะปัจจุบันบนภาพ
+            status_text = f"Points: {len(distance_node.points)}/2 | Mode: {'ON' if distance_node.measurement_active else 'OFF'}"
+            cv2.putText(frame1, status_text, (10, 20), 
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
+
+            # Encode and send frames
+            _, encoded_frame1 = cv2.imencode('.jpg', frame1, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            _, encoded_frame2 = cv2.imencode('.jpg', frame2, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            
+            message = (
+                b'\x01' + struct.pack("Q", len(encoded_frame1)) + encoded_frame1.tobytes() +
+                b'\x02' + struct.pack("Q", len(encoded_frame2)) + encoded_frame2.tobytes()
+            )
+
+            try:
+                client_socket.sendall(message)
+            except (socket.error, BrokenPipeError):
+                print("Connection lost. Reconnecting...")
+                client_socket.close()
+                client_socket = connect_to_server()
+
+    except KeyboardInterrupt:
+        print("\nStopping stream...")
+
+    finally:
+        cap1.release()
+        cap2.release()
+        client_socket.close()
+        distance_node.destroy_node()
+        rclpy.shutdown()
+        print("Connection closed.")
+
+if __name__ == '__main__':
+    main()
