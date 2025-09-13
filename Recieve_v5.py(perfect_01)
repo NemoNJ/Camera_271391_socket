@@ -1,0 +1,195 @@
+import cv2
+import socket
+import struct
+import numpy as np
+import threading
+import time
+
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int32
+
+# ---------------- ROS2 Subscriber Node ----------------
+class CameraModeNode(Node):
+    def __init__(self, *, initial_mode=0):
+        super().__init__('receive_image_camera_mode_node')
+        self._mode = initial_mode
+        self._last_mode = initial_mode
+        self._lock = threading.Lock()
+        # Subscribe /move_camera (Int32)
+        self._sub = self.create_subscription(Int32, '/move_camera', self._cb, 10)
+
+    def _cb(self, msg: Int32):
+        # logic: 1 => mode += 1, else => mode -= 1; clamp 0..2
+        with self._lock:
+            mode = self._mode
+            data = int(msg.data)
+            if data == 1:
+                mode += 1
+            else:
+                mode -= 1
+            # clamp
+            if mode < 0: mode = 0
+            if mode > 2: mode = 2
+            self._mode = mode
+            self._last_mode = mode
+        self.get_logger().info(f"move_camera received: {msg.data} -> mode={self._mode}")
+
+    def get_mode(self) -> int:
+        with self._lock:
+            return self._mode
+
+# ---------------- Video Receiver ----------------
+def receive_video(conn, mode_node: CameraModeNode):
+    data = b""
+    payload_size = struct.calcsize("Q")
+    
+    cv2.namedWindow("Camera 1", cv2.WINDOW_NORMAL)
+    cv2.namedWindow("Camera 2", cv2.WINDOW_NORMAL)
+
+    try:
+        while True:
+            while len(data) < (payload_size + 1):  # +1 for camera ID
+                packet = conn.recv(4096)
+                if not packet:
+                    print("Client disconnected.")
+                    return
+                data += packet
+
+            camera_id = data[0]
+            data = data[1:]
+
+            packed_msg_size = data[:payload_size]
+            data = data[payload_size:]
+            msg_size = struct.unpack("Q", packed_msg_size)[0]
+
+            while len(data) < msg_size:
+                more = conn.recv(4096)
+                if not more:
+                    print("Client disconnected mid-frame.")
+                    return
+                data += more
+
+            frame_data = data[:msg_size]
+            data = data[msg_size:]
+
+            frame = cv2.imdecode(np.frombuffer(frame_data, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if frame is None:
+                continue
+
+            if camera_id == 1:
+                # ====== DRAW FOR CAMERA 1 (ตามของเดิม) ======
+                height, width, _ = frame.shape
+                center_x = width // 2
+                center_y = height // 2
+                green_line_length = 62
+                green_line_length_2 = 200
+                reduced_length = 46
+                # vertical lines
+                cv2.line(frame, (center_x - green_line_length, center_y - green_line_length_2),
+                         (center_x - green_line_length, center_y + green_line_length_2), (0, 0, 255), 2)
+                cv2.line(frame, (center_x + green_line_length, center_y - green_line_length_2),
+                         (center_x + green_line_length, center_y + green_line_length_2), (0, 0, 255), 2)
+                cv2.line(frame, (center_x, center_y - green_line_length_2 - reduced_length),
+                         (center_x, center_y + green_line_length_2 - reduced_length), (0, 0, 255), 1)
+                # horizontal lines
+                cv2.line(frame, (center_x - green_line_length, center_y - green_line_length - reduced_length),
+                         (center_x + green_line_length, center_y - green_line_length - reduced_length), (0, 255, 255), 1)
+                cv2.line(frame, (center_x - green_line_length, center_y + green_line_length - reduced_length),
+                         (center_x + green_line_length, center_y + green_line_length - reduced_length), (0, 255, 255), 1)
+                cv2.line(frame, (center_x - green_line_length, center_y - reduced_length),
+                         (center_x + green_line_length, center_y - reduced_length), (0, 0, 255), 1)
+                cv2.line(frame, (center_x - green_line_length, center_y + 2 * green_line_length - reduced_length),
+                         (center_x + green_line_length, center_y + 2 * green_line_length - reduced_length), (0, 0, 255), 1)
+
+                frame = cv2.flip(frame, -1)
+                cv2.imshow("Camera 1", frame)
+
+            elif camera_id == 2:
+                # ====== DRAW FOR CAMERA 2 (ขึ้นกับ mode) ======
+                height, width, _ = frame.shape
+                center_x = width // 2
+                center_y = height // 2
+                green_line_length = 90
+                reduced_length = 46
+                adapt_length = 50
+                cx = width // 2
+                cy = height // 2
+                mode = mode_node.get_mode()
+
+                if mode == 0:#90 degree
+                    # Horizontal length 70 (centered at (cx, cy))
+                    green_line_length_2 = 200
+                    cv2.line(frame, (center_x - green_line_length, center_y - green_line_length_2),
+                         (center_x - green_line_length , center_y + green_line_length_2), (0, 255, 255), 2)
+                    cv2.line(frame, (center_x + green_line_length - 5, center_y - green_line_length_2),
+                         (center_x + green_line_length + 20, center_y + green_line_length_2), (0, 255, 255), 2)
+                elif mode == 1:#135 degree
+                    green_line_length_2 = 200
+                    cv2.line(frame, (center_x - green_line_length + 90 - adapt_length, center_y - green_line_length_2),
+                         (center_x - green_line_length-5 - adapt_length, center_y + green_line_length_2), (0, 255, 255), 2)
+                    cv2.line(frame, (center_x + green_line_length - 80 + adapt_length, center_y - green_line_length_2),
+                         (center_x + green_line_length+20+adapt_length, center_y + green_line_length_2), (0, 255, 255), 2)
+                else:  # mode == 2 180 degree
+                    green_line_length_2 = 50
+                    cv2.line(frame, (center_x - green_line_length + 40, center_y - green_line_length_2+50),
+                         (center_x - green_line_length-5 , center_y + green_line_length_2+50), (0, 255, 255), 2)
+                    cv2.line(frame, (center_x + green_line_length - 30, center_y - green_line_length_2+50),
+                         (center_x + green_line_length+20, center_y + green_line_length_2+50), (0, 255, 255), 2)
+                    
+
+                cv2.imshow("Camera 2", frame)
+
+            if cv2.waitKey(1) & 0xFF == ord("q"):
+                print("Stopping stream...")
+                return
+
+    except (ConnectionResetError, BrokenPipeError):
+        print("Connection lost. Waiting for new connection...")
+        return
+    finally:
+        cv2.destroyAllWindows()
+
+def start_ros_thread(node):
+    # ใช้ SingleThreadedExecutor ก็พอ
+    from rclpy.executors import SingleThreadedExecutor
+    executor = SingleThreadedExecutor()
+    executor.add_node(node)
+    try:
+        executor.spin()
+    finally:
+        executor.shutdown()
+        node.destroy_node()
+        rclpy.shutdown()
+
+def main():
+    # ----- ตั้งค่า ROS_DOMAIN_ID ให้ตรงกับ ESP32 ถ้าใช้ domain 10 -----
+    # rclpy.init(args=['--ros-args', '--ros-domain-id', '10'])
+    rclpy.init()  # ถ้าเซ็ต ROS_DOMAIN_ID ไว้ใน env แล้ว ใช้อันนี้ก็ได้
+
+    mode_node = CameraModeNode(initial_mode=0)
+
+    # run ROS2 in background
+    ros_thread = threading.Thread(target=start_ros_thread, args=(mode_node,), daemon=True)
+    ros_thread.start()
+
+    # TCP server for frames
+    server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server_socket.bind(("0.0.0.0", 5001))
+    server_socket.listen(5)
+    print("Waiting for connection...")
+
+    try:
+        while True:
+            conn, addr = server_socket.accept()
+            print(f"Connected to {addr}")
+            try:
+                receive_video(conn, mode_node)
+            finally:
+                conn.close()
+    finally:
+        server_socket.close()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
